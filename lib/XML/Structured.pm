@@ -3,13 +3,22 @@ package XML::Structured;
 
 use vars qw($VERSION @ISA @EXPORT);
 
+require Exporter;
 @ISA               = qw(Exporter);
 @EXPORT            = qw(XMLin XMLinfile XMLout);
-$VERSION           = '1.0';
+$VERSION           = '1.01';
 
 use XML::Parser;
+use Encode;
 
 use strict;
+
+our $bytes;
+
+sub import {
+  $bytes = 1 if grep {$_ eq ':bytes'} @_;
+  __PACKAGE__->export_to_level(1, grep {$_ ne ':bytes'} @_);
+}
 
 sub _workin {
   my ($how, $out, $ain, @in) = @_;
@@ -25,6 +34,7 @@ sub _workin {
     } else {
       die("attribute '$a' must be singleton\n") if exists $out->{$a};
       $out->{$a} = $ain->{$a};
+      Encode::_utf8_off($out->{$a}) if $bytes;
     }
   }
   while (@in) {
@@ -33,6 +43,7 @@ sub _workin {
     if ($e eq '0') {
       next if $v =~ /^\s*$/s;
       die("element '$am' contains content\n") unless $known{'_content'};
+      Encode::_utf8_off($v) if $bytes;
       $v =~ s/\s+$/ /s;
       $v =~ s/^\s+/ /s;
       if (exists $out->{'_content'}) {
@@ -43,17 +54,24 @@ sub _workin {
       }
       next;
     }
+    if (!$ke && $known{''}) {
+      $ke = $known{''};
+      $v = [{}, $e, $v];
+      $e = '';
+    }
     die("unknown element: $e\n") unless $ke;
     if (!ref($ke)) {
       push @$v, '0', '' if @$v == 1;
-      die("element '$e' contains attributes\n") if %{$v->[0]};
+      die("element '$e' contains attributes @{[keys %{$v->[0]}]}\n") if %{$v->[0]};
       die("element '$e' has subelements\n") if $v->[1] ne '0';
       die("element '$e' must be singleton\n") if exists $out->{$e};
+      Encode::_utf8_off($v->[2]) if $bytes;
       $out->{$e} = $v->[2];
     } elsif (@$ke == 1 && !ref($ke->[0])) {
       push @$v, '0', '' if @$v == 1;
       die("element '$e' contains attributes\n") if %{$v->[0]};
       die("element '$e' has subelements\n") if $v->[1] ne '0';
+      Encode::_utf8_off($v->[2]) if $bytes;
       push @{$out->{$e}}, $v->[2];
     } else {
       if (@$ke == 1) {
@@ -88,7 +106,12 @@ sub _workout {
   my $ret = "$indent<$am";
   my $inelem;
   my %d2 = %$d;
-  my $gotel;
+  my $gotel = 0;
+  if ($am eq '') {
+    $ret = '';
+    $gotel = $inelem = 1;
+    $indent = substr($indent, 2);
+  }
   for my $e (@how) {
     if (!$inelem && !ref($e) && $e ne '_content') {
       next unless exists $d2{$e};
@@ -103,6 +126,12 @@ sub _workout {
     $en = $en->[0] if ref($en);
     next unless exists $d2{$en};
     my $ee = _escape($en);
+    if (!ref($e) && $e eq '_content' && !$gotel) {
+      $gotel = 2;	# special marker to strip indent
+      $ret .= ">"._escape($d2{$e})."\n";
+      delete $d2{$e};
+      next;
+    }
     $ret .= ">\n" unless $gotel;
     $gotel = 1;
     if (!ref($e)) {
@@ -113,7 +142,11 @@ sub _workout {
         delete $d2{$e};
         next;
       }
-      $ret .= "$indent  <$ee>"._escape($d2{$e})."</$ee>\n";
+      if (defined($d2{$e})) {
+        $ret .= "$indent  <$ee>"._escape($d2{$e})."</$ee>\n";
+      } else {
+        $ret .= "$indent  <$ee/>\n";
+      }
       delete $d2{$e};
       next;
     } elsif (@$e == 1 && !ref($e->[0])) {
@@ -136,8 +169,10 @@ sub _workout {
     }
   }
   die("excess hash entries: ".join(', ', sort keys %d2)."\n") if %d2;
-  if ($gotel) {
-    $ret .= "$indent</$am>\n";
+  if ($gotel == 2 && $ret =~ s/\n$//s) {
+    $ret .= "</$am>\n" unless $am eq '';
+  } elsif ($gotel) {
+    $ret .= "$indent</$am>\n" unless $am eq '';
   } else {
     $ret .= " />\n";
   }
@@ -222,7 +257,8 @@ sub XMLin {
   $xmlinparser = _chooseparser() unless defined $xmlinparser;
   my $d = $xmlinparser->($str);
   my $out = {};
-  die("document element must be '$dtd->[0]', was '$d->[0]'\n") if $dtd->[0] ne '' && $d->[0] ne $dtd->[0];
+  $d = ['', [{}, @$d]] if $dtd->[0] eq '';
+  die("document element must be '$dtd->[0]', was '$d->[0]'\n") if $d->[0] ne $dtd->[0];
   _workin($dtd, $out, @{$d->[1]});
   return $out;
 }
@@ -238,6 +274,14 @@ sub XMLinfile {
 
 sub XMLout {
   my ($dtd, $d) = @_;
+  die("parameter is not a hash\n") unless UNIVERSAL::isa($d, 'HASH');
+  if ($dtd->[0] eq '') {
+    die("excess hash elements\n") if keys %$d > 1;
+    for my $el (@$dtd) {
+      return _workout($el, $d->{$el->[0]}, '') if ref($el) && $d->{$el->[0]};
+    }
+    die("no match for alternative\n");
+  }
   return _workout($dtd, $d, '');
 }
 
